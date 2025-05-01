@@ -179,6 +179,21 @@ class BaseModel:
         for name, field in cls.__dict__.items():
             if isinstance(field, ManyToMany):
                 field.contribute_to_class(cls, name)
+            elif isinstance(field, ForeignKey):
+                field.contribute_reverse_field(cls)
+
+    def _get_fields(self):
+        fields = []
+        for k in dir(self):
+            if k.startswith("_"): continue
+            print(f"{k} : {type(getattr(type(self),k))}")
+            props = [ Field, ManyToMany]
+            if any([ isinstance(getattr(type(self), k), p) for p in props]):
+                fields.append(k)
+        return fields
+
+    def _get_properties(self):
+        return [ k for k in dir(self) if isinstance(getattr(type(self),k),property) ]
 
     def __setattr__(self, key, value):
         """Ensure attributes are stored in self.__dict__ properly."""
@@ -186,8 +201,14 @@ class BaseModel:
         self.__dict__[key] = value  # Store attributes explicitly in instance dictionary
 
     def __repr__(self):
-        key = list(self.__dict__.keys())[0]
-        return f"{self.__class__.__name__}({key}:{getattr(self,key)})"
+        display = []
+        for k in self._get_fields():
+            if isinstance(getattr(type(self),k), ForeignKey):
+                display.append(k)
+            else:
+                display.append(f"{k}:{getattr(self,k)}")
+        display = ";".join(display)
+        return f"{self.__class__.__name__}({display})"
 
 
 class ManyToManyManager:
@@ -270,6 +291,7 @@ class ManyToMany:
         # Register the reverse relationship if a reverse lookup name is provided
         if self.reverse_lookup:
             reverse_field = ManyToMany(cls)  # Create a reverse ManyToMany field
+            reverse_field._relations = self._relations
             reverse_field.contribute_to_class(self.related_class, self.reverse_lookup)
 
     def __get__(self, instance, owner):
@@ -286,8 +308,9 @@ class ForeignKey:
 
     _reverse_relations = {}  # Tracks reverse relations {related_class: {related_instance: set(instances)}}
 
-    def __init__(self, related_class):
+    def __init__(self, related_class, related_name=None):
         self.related_class = related_class
+        self.related_name = related_name
         self._data = {}
 
     def __get__(self, instance, owner):
@@ -306,6 +329,17 @@ class ForeignKey:
         if value not in self._reverse_relations.setdefault(self.related_class, {}):
             self._reverse_relations[self.related_class][value] = set()
         self._reverse_relations[self.related_class][value].add(instance)
+
+    def contribute_reverse_field(self,cls):
+        if self.related_name != None:
+            reverse_name = self.related_name
+        else:
+            reverse_name = f"{cls.__name__}_set"
+
+        def getter(instance):
+            related = self.related_objects(instance)
+            return QuerySet(type(next(iter(related), None)), related)
+        setattr(self.related_class, reverse_name, property(getter))
 
     def related_objects(self, instance):
         """Retrieve all objects related to this instance via ForeignKey."""
@@ -332,7 +366,7 @@ class Field:
 class Serializer:
     """Handles serialization of BaseModel objects, including nested relationships."""
 
-    def __init__(self, obj, depth=None):
+    def __init__(self, obj, depth=10):
         """
         Initialize the serializer with an object or iterable (QuerySet, list, set).
         :param obj: The object or iterable to serialize.
@@ -347,30 +381,35 @@ class Serializer:
             return ( key for key in obj.__class__.__dict__.keys() if not key.startswith('_') )
         return ()
 
-    def serialize(self, obj, _current_depth=0):
+    def serialize(self, obj, _current_depth=0,fk=True):
         """
         Recursively serialize an object, respecting the depth limit.
         :param obj: The object to serialize.
         :param _current_depth: Tracks current depth level (internal use).
+        :param fk: Should serialize the foreign keys or reverse_related properties.
         :return: Serialized representation of the object.
         """
         if self.depth is not None and _current_depth >= self.depth:
-            # if isinstance(obj,set): obj = list(obj)
-            # if isinstance(obj,list) or isinstance(obj,tuple):
-            #     if len(obj) == 0: return []
             return repr(obj)  # Stop recursion and return string representation
 
         if isinstance(obj, (list, set, QuerySet)):
+            if not(hasattr(obj,"__iter__")): obj = obj.all()
             return [self.serialize(item, _current_depth) for item in obj]
 
         if isinstance(obj, BaseModel):  # Handle model objects
             data = {}
-            for field in self.get_fields(obj):
+            fields = obj._get_fields()
+            properties = obj._get_properties()
+            for field in fields + properties:
                 value = getattr(obj, field)
-                if isinstance(value, BaseModel):
-                    data[field] = self.serialize(value, _current_depth + 1)  # Recursive serialization
+                if isinstance(value, QuerySet):
+                    if fk:
+                        data[field] = self.serialize(value, _current_depth + 1, fk=False)
+                elif isinstance(value, BaseModel):
+                    data[field] = self.serialize(value, _current_depth + 1, fk=False)  # Recursive serialization
                 elif isinstance(value,ManyToManyManager):
-                    data[field] = self.serialize(value.query().all(), _current_depth + 1)  # Recursive serialization
+                    if fk:
+                        data[field] = self.serialize(value.query().all(), _current_depth + 1, fk=False)  # Recursive serialization
                 else:
                     data[field] = value  # Primitive value (string, int, etc.)
 

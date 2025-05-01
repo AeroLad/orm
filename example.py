@@ -9,7 +9,7 @@ class Tag(BaseModel):
 
 class Post(BaseModel):
     title = Field()
-    author = ForeignKey(User)
+    author = ForeignKey(User,related_name="posts")
     tags = ManyToMany(Tag)
 
 # Create Users
@@ -30,9 +30,9 @@ post4 = Post(title="Deep Learning", author=alice)
 post5 = Post(title="Advanced Python", author=bob)
 
 post1.tags.set([tag_python,tag_ai])
-posts = Serializer(Post.query().all()).to_json()
 
-# print(alice.posts.query().all())
+tags = Tag.query().all()
+print(tags)
+posts = Post.query()
+print(posts)
 print(post1)
-print(vars(post1))
-# print(alice)

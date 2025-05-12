@@ -322,51 +322,88 @@ class RelatedManager:
         return f"RelatedManger<{self.source_class.__name__}->{related_class}>({self.query().count()})"
 
 class ForeignKey:
-    """A simple ForeignKey implementation with reverse lookup support."""
+    """ForeignKey implementation with relationship-specific reverse lookups."""
 
-    _reverse_relations = {}  # Tracks reverse relations {related_class: {related_instance: set(instances)}}
+    # We'll use a nested dict structure to track relationships by name
+    _reverse_relations = {}  # Format: {related_class: {relationship_name: {instance: set(related_instances)}}}
 
-    def __init__(self,related_class=None, related_name=None):
+    def __init__(self, related_class=None, related_name=None):
         self.related_class = related_class
         self.related_name = related_name
-        self._data = {}
+        self._data = {}  # Stores forward relations {instance: related_instance}
+        self.relationship_name = None  # Will be set when contributing to class
 
     def __get__(self, instance, owner):
-        if instance is None: return self
+        if instance is None:
+            return self
         return self._data.get(instance)
 
     def __set__(self, instance, value):
-        if value == None: return
+        if value is None:
+            # Handle nulling the relationship
+            if instance in self._data:
+                old_value = self._data[instance]
+                self._remove_reverse_relation(instance, old_value)
+                del self._data[instance]
+            return
+
         if not isinstance(value, self.related_class):
             raise TypeError(f"Expected instance of {self.related_class.__name__}, got {type(value).__name__}")
 
-        # Store the relation
+        # Remove any existing relationship
+        if instance in self._data:
+            old_value = self._data[instance]
+            self._remove_reverse_relation(instance, old_value)
+
+        # Set the new relationship
         self._data[instance] = value
+        self._add_reverse_relation(instance, value)
 
-        # Register reverse lookup
-        if value not in self._reverse_relations.setdefault(self.related_class, {}):
-            self._reverse_relations[self.related_class][value] = set()
-        self._reverse_relations[self.related_class][value].add(instance)
+    def _add_reverse_relation(self, instance, related_instance):
+        """Add a reverse relationship tracking by relationship name."""
+        if self.related_class not in self._reverse_relations:
+            self._reverse_relations[self.related_class] = {}
 
-    def contribute_reverse_field(self,cls):
-        if self.related_class == "self": self.related_class = cls
+        if self.relationship_name not in self._reverse_relations[self.related_class]:
+            self._reverse_relations[self.related_class][self.relationship_name] = {}
+
+        if related_instance not in self._reverse_relations[self.related_class][self.relationship_name]:
+            self._reverse_relations[self.related_class][self.relationship_name][related_instance] = set()
+
+        self._reverse_relations[self.related_class][self.relationship_name][related_instance].add(instance)
+
+    def _remove_reverse_relation(self, instance, related_instance):
+        """Remove a reverse relationship."""
+        if (self.related_class in self._reverse_relations and
+            self.relationship_name in self._reverse_relations[self.related_class] and
+            related_instance in self._reverse_relations[self.related_class][self.relationship_name]):
+
+            self._reverse_relations[self.related_class][self.relationship_name][related_instance].discard(instance)
+
+            # Clean up empty sets
+            if not self._reverse_relations[self.related_class][self.relationship_name][related_instance]:
+                del self._reverse_relations[self.related_class][self.relationship_name][related_instance]
+
+    def contribute_reverse_field(self, cls):
+        """Set up the reverse relationship accessor."""
+        if self.related_class == "self":
+            self.related_class = cls
+
+        # Use the field name as the relationship identifier
+        self.relationship_name = self.related_name or f"{cls.__name__.lower()}_set"
+
         def getter(instance):
             related_objects = self.related_objects(instance)
-            related_objects = filter(lambda x: isinstance(x,cls), related_objects)
-            return RelatedManager(cls,self.related_class,related_objects)
-            # return QuerySet(type(next(iter(related_objects), None)), related_objects)
-        if self.related_name == None: self.related_name = f"{self.related_class.__name__.lower()}_set"
-        # print(f"Contributing to {self.related_class.__name__}<-{cls.__name__} as {self.related_class.__name__}.{self.related_name}")
-        setattr(self.related_class, self.related_name, property(getter))
+            return RelatedManager(cls, self.related_class, related_objects)
+
+        setattr(self.related_class, self.relationship_name, property(getter))
 
     def related_objects(self, instance):
-        """Retrieve all objects related to this instance via ForeignKey."""
-        return self._reverse_relations.get(self.related_class, {}).get(instance, set())
-
-    # def all(self, instance):
-    #     """Return QuerySet-like behavior for reverse lookup."""
-    #     print("Here")
-    #     return QuerySet(type(instance), self.related_objects(instance))
+        """Get objects related through this specific relationship."""
+        return (self._reverse_relations
+                .get(self.related_class, {})
+                .get(self.relationship_name, {})
+                .get(instance, set()))
 
 class Field:
     """Simple field descriptor."""
